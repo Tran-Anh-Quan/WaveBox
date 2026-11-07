@@ -1,0 +1,46 @@
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+**/doc/api/
+**/ios/Flutter/.last_build_id
+app.*.symbols
+app.*.map.json
+
+# Android build artifacts
+/music_app/android/app/debug
+/music_app/android/app/profile
+/music_app/android/app/release
+/music_app/android/.gradle/
+*.class
+
+# IntelliJ / Android Studio
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# VS Code (optional - uncomment to ignore)
+# .vscode/
+
+# Misc
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Temp
+~$*.docx
