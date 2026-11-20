@@ -23,18 +23,9 @@ class SongRepository {
     return [];
   }
 
-  /// Thêm bài vào playlist: lưu SQLite ngay + đẩy lên server,
-  /// nếu lỗi mạng thì ghi Pending Sync Queue để đồng bộ sau.
-  Future<void> addSongToPlaylistOnline(int playlistId, Song s, {required bool isOnline}) async {
+  /// Saves the playlist change locally and queues it for ordered synchronization.
+  Future<void> addSongToPlaylistOnline(int playlistId, Song s,
+      {required bool isOnline}) async {
     await db.addToPlaylist(playlistId, s);
-    if (!isOnline) {
-      await db.enqueueSync('ADD_TO_PLAYLIST', {'playlistId': playlistId, 'songId': s.id});
-      return;
-    }
-    try {
-      await api.post('/api/playlists/$playlistId/songs', {'songId': s.id});
-    } catch (_) {
-      await db.enqueueSync('ADD_TO_PLAYLIST', {'playlistId': playlistId, 'songId': s.id});
-    }
   }
 }

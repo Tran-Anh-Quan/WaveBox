@@ -50,8 +50,7 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
       ),
     );
     if (name != null && name.isNotEmpty) {
-      final id = await _db.insertPlaylist(name);
-      await _db.enqueueSync('CREATE_PLAYLIST', {'playlistId': id, 'payload': name});
+      await _db.insertPlaylist(name);
       _load();
     }
   }
@@ -140,7 +139,6 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
     );
     if (name != null && name.isNotEmpty && p.id != null) {
       await _db.renamePlaylist(p.id!, name);
-      await _db.enqueueSync('RENAME_PLAYLIST', {'playlistId': p.id, 'payload': name});
       _load();
     }
   }
@@ -159,7 +157,6 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
     );
     if (ok == true && p.id != null) {
       await _db.deletePlaylist(p.id!);
-      await _db.enqueueSync('DELETE_PLAYLIST', {'playlistId': p.id});
       _load();
     }
   }
@@ -224,8 +221,6 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                     ? null
                     : () async {
                         await _db.addToPlaylist(widget.playlist.id ?? -1, s);
-                        await _db.enqueueSync('ADD_TO_PLAYLIST',
-                            {'playlistId': widget.playlist.id, 'songId': s.id});
                         _load();
                         if (mounted) Navigator.pop(context);
                       },
@@ -288,8 +283,6 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                         direction: DismissDirection.endToStart,
                         onDismissed: (_) async {
                           await _db.removeFromPlaylist(widget.playlist.id ?? -1, s.id);
-                          await _db.enqueueSync('REMOVE_FROM_PLAYLIST',
-                              {'playlistId': widget.playlist.id, 'songId': s.id});
                           _load();
                         },
                         child: Container(

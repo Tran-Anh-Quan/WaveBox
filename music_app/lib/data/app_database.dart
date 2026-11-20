@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -42,7 +44,7 @@ class AppDatabase {
       }
       final dir = await getApplicationDocumentsDirectory();
       final path = p.join(dir.path, 'music_app.db');
-      _db = await openDatabase(path, version: 3,
+      _db = await openDatabase(path, version: 4,
           onCreate: (db, v) async => _createV3(db),
           onUpgrade: (db, oldV, newV) async => _upgrade(db, oldV));
       return _db;
@@ -61,7 +63,7 @@ class AppDatabase {
     await db.execute(
         'CREATE TABLE history(id INTEGER PRIMARY KEY AUTOINCREMENT, songId INTEGER NOT NULL, songTitle TEXT, songArtist TEXT, songAlbum TEXT, songData TEXT, songDuration INTEGER, ownerId TEXT, playedAt INTEGER NOT NULL)');
     await db.execute(
-        'CREATE TABLE pending_sync(id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, playlistId INTEGER, songId INTEGER, fav INTEGER, payload TEXT, status TEXT DEFAULT "pending", retries INTEGER DEFAULT 0, createdAt INTEGER NOT NULL)');
+        'CREATE TABLE pending_sync(id INTEGER PRIMARY KEY AUTOINCREMENT, operationId TEXT UNIQUE, op TEXT NOT NULL, playlistId INTEGER, songId INTEGER, fav INTEGER, payload TEXT, payloadJson TEXT, status TEXT DEFAULT "pending", retries INTEGER DEFAULT 0, createdAt INTEGER NOT NULL)');
     await db.execute(
         'CREATE TABLE artists(id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, coverUrl TEXT, bio TEXT)');
     await db.execute(
@@ -128,9 +130,54 @@ class AppDatabase {
             'UPDATE playlists SET updatedAt=createdAt WHERE updatedAt=0 OR updatedAt IS NULL');
       } catch (_) {}
     }
+    if (oldV < 4) {
+      await db.execute('ALTER TABLE pending_sync ADD COLUMN operationId TEXT');
+      await db.execute('ALTER TABLE pending_sync ADD COLUMN payloadJson TEXT');
+      await db.execute(
+          'CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_operation ON pending_sync(operationId)');
+      final legacyRows = await db.query('pending_sync',
+          columns: ['id'], where: 'operationId IS NULL');
+      for (final row in legacyRows) {
+        final id = (row['id'] as num).toInt();
+        await db.update('pending_sync', {'operationId': _newOperationId()},
+            where: 'id=?', whereArgs: [id]);
+      }
+    }
   }
 
-  // ================= Playlists (UC 5.x + 9.1) =================
+  Future<int> upsertPlaylistFromSync(Playlist playlist) async {
+    final row = playlist.toMap()..['isSynced'] = 1;
+    final db = await _open();
+    if (db == null) {
+      final list = _mem['playlists']!;
+      final index = list.indexWhere((e) => playlist.uuid != null && e['uuid'] == playlist.uuid);
+      if (index >= 0) {
+        final id = list[index]['id'];
+        list[index] = {...row, 'id': id ?? playlist.id};
+        return (list[index]['id'] as num).toInt();
+      }
+      final id = _autoId++;
+      list.add({...row, 'id': id});
+      return id;
+    }
+    final where = playlist.uuid != null
+        ? 'uuid=?'
+        : 'name=? AND ownerId IS ? AND createdAt=?';
+    final keyArgs = playlist.uuid != null
+        ? <Object?>[playlist.uuid]
+        : <Object?>[playlist.name, playlist.ownerId, playlist.createdAt];
+    final existing = await db.query('playlists',
+        where: where, whereArgs: keyArgs, columns: ['id'], limit: 1);
+    final map = Map<String, dynamic>.from(row)..remove('id');
+    if (existing.isEmpty) {
+      return db.insert('playlists', map,
+          conflictAlgorithm: ConflictAlgorithm.replace);
+    }
+    final id = (existing.first['id'] as num).toInt();
+    await db.update('playlists', map, where: 'id=?', whereArgs: [id]);
+    return id;
+  }
+
   Future<int> insertPlaylist(String name, {String? ownerId}) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final row = {
@@ -142,12 +189,23 @@ class AppDatabase {
       'isSynced': 0,
     };
     final db = await _open();
+    final uuid = _newOperationId();
+    int id;
     if (db == null) {
-      final id = _autoId++;
-      _mem['playlists']!.add({'id': id, ...row});
-      return id;
+      id = _autoId++;
+      _mem['playlists']!.add({'id': id, 'uuid': uuid, ...row});
+    } else {
+      id = await db.insert('playlists', {'uuid': uuid, ...row});
     }
-    return db.insert('playlists', row);
+    await enqueueSync('CREATE_PLAYLIST', {
+      'playlistId': id,
+      'playlistUuid': uuid,
+      'name': name,
+      'payload': name,
+      'createdAt': now,
+      'ownerId': ownerId,
+    });
+    return id;
   }
 
   Future<List<Playlist>> getPlaylists() async {
@@ -160,28 +218,67 @@ class AppDatabase {
   Future<void> renamePlaylist(int id, String name) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final db = await _open();
+    String? uuid;
     if (db == null) {
       final i = _mem['playlists']!.indexWhere((e) => e['id'] == id);
       if (i >= 0) {
+        uuid = _mem['playlists']![i]['uuid'] as String? ?? _newOperationId();
+        _mem['playlists']![i]['uuid'] = uuid;
         _mem['playlists']![i]['name'] = name;
         _mem['playlists']![i]['updatedAt'] = now;
         _mem['playlists']![i]['isSynced'] = 0;
       }
-      return;
+    } else {
+      final rows = await db.query('playlists', columns: ['uuid'],
+          where: 'id=?', whereArgs: [id], limit: 1);
+      if (rows.isNotEmpty) {
+        uuid = rows.first['uuid'] as String?;
+        if (uuid == null || uuid!.isEmpty) {
+          uuid = _newOperationId();
+          await db.update('playlists', {'uuid': uuid}, where: 'id=?', whereArgs: [id]);
+        }
+      }
+      await db.update('playlists', {'name': name, 'updatedAt': now, 'isSynced': 0},
+          where: 'id=?', whereArgs: [id]);
     }
-    await db.update('playlists', {'name': name, 'updatedAt': now, 'isSynced': 0},
-        where: 'id=?', whereArgs: [id]);
+    if (uuid != null) {
+      await enqueueSync('RENAME_PLAYLIST', {
+        'playlistId': id,
+        'playlistUuid': uuid,
+        'name': name,
+        'payload': name,
+      });
+    }
   }
 
   Future<void> deletePlaylist(int id) async {
     final db = await _open();
+    String? uuid;
     if (db == null) {
+      final i = _mem['playlists']!.indexWhere((e) => e['id'] == id);
+      if (i >= 0) {
+        uuid = _mem['playlists']![i]['uuid'] as String? ?? _newOperationId();
+        _mem['playlists']![i]['uuid'] = uuid;
+      }
       _mem['playlists']!.removeWhere((e) => e['id'] == id);
       _mem['playlist_songs']!.removeWhere((e) => e['playlistId'] == id);
-      return;
+    } else {
+      final rows = await db.query('playlists', columns: ['uuid'],
+          where: 'id=?', whereArgs: [id], limit: 1);
+      if (rows.isNotEmpty) {
+        uuid = rows.first['uuid'] as String?;
+        if (uuid == null || uuid!.isEmpty) {
+          uuid = _newOperationId();
+          await db.update('playlists', {'uuid': uuid}, where: 'id=?', whereArgs: [id]);
+        }
+      }
+      await db.delete('playlist_songs', where: 'playlistId=?', whereArgs: [id]);
+      await db.delete('playlists', where: 'id=?', whereArgs: [id]);
     }
-    await db.delete('playlist_songs', where: 'playlistId=?', whereArgs: [id]);
-    await db.delete('playlists', where: 'id=?', whereArgs: [id]);
+    await enqueueSync('DELETE_PLAYLIST', {
+      'playlistId': id,
+      if (uuid != null) 'playlistUuid': uuid,
+    });
   }
 
   Future<void> addToPlaylist(int playlistId, Song s) async {
@@ -199,7 +296,14 @@ class AppDatabase {
     if (db == null) {
       final exists = _mem['playlist_songs']!
           .any((e) => e['playlistId'] == playlistId && e['songId'] == s.id);
-      if (!exists) _mem['playlist_songs']!.add({'id': _autoId++, ...row});
+      if (exists) return;
+      _mem['playlist_songs']!.add({'id': _autoId++, ...row});
+      final i = _mem['playlists']!.indexWhere((e) => e['id'] == playlistId);
+      if (i >= 0) {
+        _mem['playlists']![i]['updatedAt'] = row['addedAt'];
+        _mem['playlists']![i]['isSynced'] = 0;
+      }
+      await enqueueSync('ADD_TO_PLAYLIST', {'playlistId': playlistId, 'songId': s.id});
       return;
     }
     final dup = await db.query('playlist_songs',
@@ -209,17 +313,33 @@ class AppDatabase {
       'updatedAt': DateTime.now().millisecondsSinceEpoch,
       'isSynced': 0
     }, where: 'id=?', whereArgs: [playlistId]);
+    await enqueueSync('ADD_TO_PLAYLIST', {'playlistId': playlistId, 'songId': s.id});
   }
 
   Future<void> removeFromPlaylist(int playlistId, int songId) async {
+    final playlistUuid = await _ensurePlaylistUuid(playlistId);
     final db = await _open();
     if (db == null) {
+      final existed = _mem['playlist_songs']!.any(
+          (e) => e['playlistId'] == playlistId && e['songId'] == songId);
+      if (!existed) return;
       _mem['playlist_songs']!.removeWhere(
           (e) => e['playlistId'] == playlistId && e['songId'] == songId);
-      return;
+      final index = _mem['playlists']!.indexWhere((e) => e['id'] == playlistId);
+      if (index >= 0) _mem['playlists']![index]['isSynced'] = 0;
+    } else {
+      final removed = await db.delete('playlist_songs',
+          where: 'playlistId=? AND songId=?', whereArgs: [playlistId, songId]);
+      if (removed == 0) return;
+      await db.update('playlists', {'isSynced': 0,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch},
+        where: 'id=?', whereArgs: [playlistId]);
     }
-    await db.delete('playlist_songs',
-        where: 'playlistId=? AND songId=?', whereArgs: [playlistId, songId]);
+    await enqueueSync('REMOVE_FROM_PLAYLIST', {
+      'playlistId': playlistId,
+      'playlistUuid': playlistUuid,
+      'songId': songId,
+    });
   }
 
   Future<List<Song>> getPlaylistSongs(int playlistId) async {
@@ -246,7 +366,8 @@ class AppDatabase {
   }
 
   // ================= Favorites (UC 6.1-6.3 + 9.2) =================
-  Future<void> toggleFavorite(Song s, bool fav, {String? ownerId}) async {
+  Future<void> toggleFavorite(Song s, bool fav,
+      {String? ownerId, bool sync = true}) async {
     final db = await _open();
     if (db == null) {
       if (fav) {
@@ -265,6 +386,18 @@ class AppDatabase {
         }
       } else {
         _mem['favorites']!.removeWhere((e) => e['songId'] == s.id);
+      }
+      if (sync) {
+        await enqueueSync('TOGGLE_FAVORITE', {
+          'songId': s.id,
+          'fav': fav ? 1 : 0,
+          'title': s.title,
+          'artist': s.artist,
+          'album': s.album,
+          'data': s.data,
+          'durationMs': s.durationMs,
+          'ownerId': ownerId,
+        });
       }
       return;
     }
@@ -285,6 +418,18 @@ class AppDatabase {
           conflictAlgorithm: ConflictAlgorithm.replace);
     } else {
       await db.delete('favorites', where: 'songId=?', whereArgs: [s.id]);
+    }
+    if (sync) {
+      await enqueueSync('TOGGLE_FAVORITE', {
+        'songId': s.id,
+        'fav': fav ? 1 : 0,
+        'title': s.title,
+        'artist': s.artist,
+        'album': s.album,
+        'data': s.data,
+        'durationMs': s.durationMs,
+        'ownerId': ownerId,
+      });
     }
   }
 
@@ -318,7 +463,8 @@ class AppDatabase {
   }
 
   // ================= History (UC 6.4 + 9.3) =================
-  Future<void> pushHistory(Song s, {String? ownerId}) async {
+  Future<void> pushHistory(Song s,
+      {String? ownerId, bool sync = true}) async {
     final db = await _open();
     final row = {
       'songId': s.id,
@@ -338,10 +484,20 @@ class AppDatabase {
       await db.rawDelete(
           'DELETE FROM history WHERE id NOT IN (SELECT id FROM history ORDER BY playedAt DESC LIMIT 100)');
     }
-    // UC 9.3: hàng đợi đồng bộ lịch sử — bỏ qua lỗi nếu trùng lặp
-    try {
-      await enqueueSync('PUSH_HISTORY', {'songId': s.id, 'payload': s.title});
-    } catch (_) {}
+    if (sync) {
+      try {
+        await enqueueSync('PUSH_HISTORY', {
+          'songId': s.id,
+          'title': s.title,
+          'artist': s.artist,
+          'album': s.album,
+          'data': s.data,
+          'durationMs': s.durationMs,
+          'playedAt': row['playedAt'],
+          'ownerId': ownerId,
+        });
+      } catch (_) {}
+    }
   }
 
   Future<List<Song>> getHistory() async {
@@ -364,14 +520,14 @@ class AppDatabase {
         .toList();
   }
 
-  Future<void> clearHistory() async {
+  Future<void> clearHistory({bool sync = true}) async {
     final db = await _open();
     if (db == null) {
       _mem['history']!.clear();
-      return;
+    } else {
+      await db.delete('history');
     }
-    await db.delete('history');
-    await enqueueSync('CLEAR_HISTORY', {});
+    if (sync) await enqueueSync('CLEAR_HISTORY', {});
   }
 
   Future<void> deleteHistoryItem(int id) async {
@@ -617,14 +773,54 @@ class AppDatabase {
     return '${rows.first['value']}';
   }
 
+  String _newOperationId() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-'
+        '${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
+  }
+
+  Future<String> _ensurePlaylistUuid(int id) async {
+    final db = await _open();
+    if (db == null) {
+      final i = _mem['playlists']!.indexWhere((row) => row['id'] == id);
+      if (i < 0) throw StateError('Playlist $id was not found');
+      final uuid = _mem['playlists']![i]['uuid'] as String? ?? _newOperationId();
+      _mem['playlists']![i]['uuid'] = uuid;
+      return uuid;
+    }
+    final rows = await db.query('playlists', columns: ['uuid'],
+        where: 'id=?', whereArgs: [id], limit: 1);
+    if (rows.isEmpty) throw StateError('Playlist $id was not found');
+    final existing = rows.first['uuid'] as String?;
+    if (existing != null && existing.isNotEmpty) return existing;
+    final uuid = _newOperationId();
+    await db.update('playlists', {'uuid': uuid}, where: 'id=?', whereArgs: [id]);
+    return uuid;
+  }
+
   // ---------- Pending Sync Queue (UC 9.x) ----------
   Future<void> enqueueSync(String op, Map<String, dynamic> payload) async {
+    final operationId = _newOperationId();
+    final storedPayload = Map<String, dynamic>.from(payload);
+    final playlistId = (payload['playlistId'] as num?)?.toInt();
+    if (playlistId != null &&
+        op != 'DELETE_PLAYLIST' &&
+        storedPayload['playlistUuid'] == null) {
+      storedPayload['playlistUuid'] = await _ensurePlaylistUuid(playlistId);
+    }
+    final encodedPayload = jsonEncode(storedPayload);
     final row = {
+      'operationId': operationId,
       'op': op,
-      'playlistId': payload['playlistId'],
+      'playlistId': playlistId,
       'songId': payload['songId'],
       'fav': payload['fav'],
       'payload': payload['payload']?.toString(),
+      'payloadJson': encodedPayload,
       'status': 'pending',
       'retries': 0,
       'createdAt': DateTime.now().millisecondsSinceEpoch,
@@ -638,6 +834,22 @@ class AppDatabase {
     await db.insert('pending_sync', row);
   }
 
+  Future<Set<int>> getFailedPlaylistCreateIds() async {
+    final db = await _open();
+    final rows = db == null
+        ? (_mem['pending_sync'] ?? [])
+            .where((row) => row['op'] == 'CREATE_PLAYLIST' && row['status'] == 'failed')
+            .toList()
+        : await db.query('pending_sync',
+            columns: ['playlistId'],
+            where: 'op=? AND status=?',
+            whereArgs: ['CREATE_PLAYLIST', 'failed']);
+    return rows
+        .map((row) => (row['playlistId'] as num?)?.toInt())
+        .whereType<int>()
+        .toSet();
+  }
+
   Future<List<Map<String, dynamic>>> getPendingSync({int limit = 50}) async {
     final db = await _open();
     if (db == null) {
@@ -647,7 +859,10 @@ class AppDatabase {
           .toList();
     }
     return db.query('pending_sync',
-        where: 'status=?', whereArgs: ['pending'], orderBy: 'createdAt ASC', limit: limit);
+        where: 'status=?',
+        whereArgs: ['pending'],
+        orderBy: 'createdAt ASC',
+        limit: limit);
   }
 
   Future<void> markSyncDone(int id) async {

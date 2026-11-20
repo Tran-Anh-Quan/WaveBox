@@ -150,8 +150,6 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _toggleFav(Song s) async {
     final fav = !_favIds.contains(s.id);
     await _db.toggleFavorite(s, fav);
-    await _db.enqueueSync('TOGGLE_FAVORITE',
-        {'songId': s.id, 'fav': fav ? 1 : 0, 'payload': s.title});
     if (!mounted) return;
     setState(() {
       if (fav) {

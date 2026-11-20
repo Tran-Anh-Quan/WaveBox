@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import '../../../core/network/api_client.dart';
 import '../../../core/network/connectivity_service.dart';
 import '../../../data/app_database.dart';
@@ -12,6 +13,7 @@ class SyncService {
   final ConnectivityService connectivity;
   Timer? _timer;
   int maxRetries = 5;
+  Future<int>? _activeSync;
 
   SyncService({required this.db, required this.api, required this.connectivity});
 
@@ -22,19 +24,37 @@ class SyncService {
 
   void stop() => _timer?.cancel();
 
-  Future<int> syncNow() async {
+  Future<int> syncNow() {
+    if (_activeSync != null) return _activeSync!;
+    final run = _syncPending();
+    _activeSync = run;
+    return run.whenComplete(() => _activeSync = null);
+  }
+
+  Future<int> _syncPending() async {
     if (!connectivity.isOnline) return 0;
+    final failedCreates = await db.getFailedPlaylistCreateIds();
     final pending = await db.getPendingSync(limit: 50);
     var done = 0;
+    final blockedPlaylists = <int>{...failedCreates};
     for (final item in pending) {
+      if (!connectivity.isOnline) break;
       final id = (item['id'] as num).toInt();
       final op = (item['op'] ?? '') as String;
+      final playlistId = (item['playlistId'] as num?)?.toInt();
+      if (playlistId != null && blockedPlaylists.contains(playlistId)) continue;
       final retries = (item['retries'] as num?)?.toInt() ?? 0;
+      final payload = _decodePayload(item);
+      final operationId = item['operationId']?.toString();
       try {
-        await _push(op, item);
+        await _push(op, item, payload, operationId);
         await db.markSyncDone(id);
         done++;
       } catch (_) {
+        if (op == 'CREATE_PLAYLIST' && playlistId != null) {
+          blockedPlaylists.add(playlistId);
+        }
+        if (!connectivity.isOnline) break;
         if (retries + 1 >= maxRetries) {
           await db.markSyncFailed(id);
         } else {
@@ -45,50 +65,89 @@ class SyncService {
     return done;
   }
 
-  Future<void> _push(String op, Map<String, dynamic> item) async {
+  Map<String, dynamic> _decodePayload(Map<String, dynamic> item) {
+    final encoded = item['payloadJson'];
+    if (encoded is String && encoded.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(encoded);
+        if (decoded is Map) return Map<String, dynamic>.from(decoded);
+      } catch (_) {}
+    }
+    return {
+      if (item['playlistId'] != null) 'playlistId': item['playlistId'],
+      if (item['songId'] != null) 'songId': item['songId'],
+      if (item['fav'] != null) 'fav': item['fav'],
+      if (item['payload'] != null) 'payload': item['payload'],
+    };
+  }
+
+  Future<void> _push(String op, Map<String, dynamic> item,
+      Map<String, dynamic> payload, String? operationId) async {
+    Map<String, dynamic> request(Map<String, dynamic> body) => {
+          ...body,
+          if (operationId != null) 'operationId': operationId,
+        };
+    final playlistUuid = payload['playlistUuid'] as String?;
+    final playlistId = item['playlistId'];
+    final playlistKey = playlistUuid ?? '$playlistId';
     switch (op) {
       case 'CREATE_PLAYLIST':
-        await api.post('/api/playlists', {
-          'localId': item['playlistId'],
-          'name': item['payload'],
-        });
+        await api.post('/api/playlists', request({
+          'playlistUuid': playlistUuid,
+          'name': payload['name'] ?? payload['payload'],
+          'description': payload['description'] ?? '',
+          'createdAt': payload['createdAt'],
+        }));
         break;
       case 'RENAME_PLAYLIST':
-        await api.put('/api/playlists/${item['playlistId']}',
-            {'name': item['payload']});
+        await api.put('/api/playlists/$playlistKey',
+            request({'playlistUuid': payload['playlistUuid'], 'name': payload['name'] ?? payload['payload']}));
         break;
       case 'DELETE_PLAYLIST':
-        await api.delete('/api/playlists/${item['playlistId']}');
+        await api.delete('/api/playlists/$playlistKey?operationId=$operationId');
         break;
       case 'ADD_TO_PLAYLIST':
-        await api.post('/api/playlists/${item['playlistId']}/songs',
-            {'songId': item['songId']});
+        await api.post('/api/playlists/$playlistKey/songs',
+            request({'playlistUuid': payload['playlistUuid'], 'songId': payload['songId']}));
         break;
       case 'REMOVE_FROM_PLAYLIST':
         await api.delete(
-            '/api/playlists/${item['playlistId']}/songs/${item['songId']}');
+            '/api/playlists/$playlistKey/songs/${payload['songId']}?operationId=$operationId');
         break;
       case 'TOGGLE_FAVORITE':
-        await api.post('/api/favorites',
-            {'songId': item['songId'], 'fav': item['fav']});
+        await api.post('/api/favorites', request({
+          'songId': payload['songId'],
+          'fav': payload['fav'],
+        }));
         break;
       case 'PUSH_HISTORY':
+        await api.post('/api/history', request({
+          'op': op,
+          'songId': payload['songId'],
+          'playedAt': payload['playedAt'],
+        }));
+        break;
       case 'CLEAR_HISTORY':
-        await api.post('/api/history',
-            {'op': op, 'songId': item['songId']});
+        await api.post('/api/history', request({'op': op}));
         break;
       case 'DOWNLOAD_SONG':
       case 'DELETE_DOWNLOAD':
-        await api.post('/api/downloads',
-            {'op': op, 'songId': item['songId']});
+        await api.post('/api/downloads', request({
+          'op': op,
+          'songId': payload['songId'],
+          'filePath': payload['filePath'] ?? payload['payload'],
+        }));
         break;
       case 'UPDATE_PROFILE':
-        await api.put('/api/auth/profile', {'displayName': item['payload']});
+        await api.put('/api/auth/profile', request({
+          'displayName': payload['displayName'] ?? payload['payload'],
+        }));
         break;
       default:
-        await api.post('/api/sync', {'op': op, 'payload': item['payload']});
+        await api.post('/api/sync', request({'op': op, 'payload': payload}));
     }
   }
+
 
   /// Khôi phục dữ liệu cá nhân về thiết bị mới (UC 9.4):
   /// pull playlists + favorites + history từ cloud rồi upsert vào SQLite.
@@ -101,11 +160,19 @@ class SyncService {
       if (pls is List) {
         for (final p in pls) {
           if (p is! Map) continue;
-          final name = '${p['name'] ?? 'Playlist'}';
-          final existing = await db.getPlaylists();
-          if (!existing.any((e) => e.name == name)) {
-            await db.insertPlaylist(name);
-          }
+          final serverId = (p['id'] as num?)?.toInt();
+          final playlist = Playlist(
+            id: serverId,
+            uuid: p['uuid']?.toString() ?? p['playlistUuid']?.toString(),
+            name: '${p['name'] ?? 'Playlist'}',
+            createdAt: (p['createdAt'] as num?)?.toInt() ?? 0,
+            description: '${p['description'] ?? ''}',
+            coverUrl: p['coverUrl']?.toString(),
+            ownerId: p['ownerId']?.toString(),
+            updatedAt: (p['updatedAt'] as num?)?.toInt() ?? 0,
+            isSynced: true,
+          );
+          await db.upsertPlaylistFromSync(playlist);
         }
       }
       final favs = await api.get('/api/favorites');
@@ -124,6 +191,8 @@ class SyncService {
               durationMs: (f['durationMs'] as num?)?.toInt() ?? 0,
             ),
             true,
+            ownerId: f['ownerId']?.toString(),
+            sync: false,
           );
         }
       }
@@ -133,14 +202,14 @@ class SyncService {
           if (h is! Map) continue;
           final sid = (h['songId'] as num?)?.toInt();
           if (sid == null) continue;
-          await db.pushHistory(Song(
+        await db.pushHistory(Song(
             id: sid,
             title: '${h['title'] ?? 'Bài hát $sid'}',
             artist: '${h['artist'] ?? 'Unknown Artist'}',
             album: '${h['album'] ?? ''}',
             data: '${h['data'] ?? ''}',
             durationMs: (h['durationMs'] as num?)?.toInt() ?? 0,
-          ));
+            ), ownerId: h['ownerId']?.toString(), sync: false);
         }
       }
       return true;

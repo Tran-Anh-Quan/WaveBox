@@ -29,8 +29,6 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
 
   Future<void> _unfav(Song s) async {
     await _db.toggleFavorite(s, false);
-    await _db.enqueueSync(
-        'TOGGLE_FAVORITE', {'songId': s.id, 'fav': 0, 'payload': s.title});
     _load();
   }
 

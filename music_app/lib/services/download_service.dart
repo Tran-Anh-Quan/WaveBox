@@ -40,7 +40,12 @@ class DownloadService {
     await db.saveDownload(
         songId: s.id, filePath: filePath, format: ext, fileSize: size);
     await db.upsertSongCache(s.copyWith(isDownloaded: true));
-    await db.enqueueSync('DOWNLOAD_SONG', {'songId': s.id, 'payload': filePath});
+    await db.enqueueSync('DOWNLOAD_SONG', {
+      'songId': s.id,
+      'filePath': filePath,
+      'fileSize': size,
+      'format': ext,
+    });
     return filePath;
   }
 
