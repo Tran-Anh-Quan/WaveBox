@@ -91,7 +91,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final songs = await _lib.loadDeviceSongs();
     final favs = await _db.getFavoriteIds();
     final genres = await _db.getGenres();
-    await _db.upsertSongsCache([...songs, ...LibraryService.sampleTracks]);
+    await _db.upsertSongsCache(songs);
     setState(() {
       _deviceSongs = songs;
       _favIds = favs;
@@ -104,13 +104,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   List<Song> get _all =>
-      [..._picked, ..._deviceSongs, ..._onlineSongs, ...LibraryService.sampleTracks];
+      [..._picked, ..._deviceSongs, ..._onlineSongs];
 
   List<Song> get _localOnly => [..._picked, ..._deviceSongs];
 
   List<Song> get _filtered {
     final base = _localOnly;
-    if (_genreFilter == null) return [...base, ..._onlineSongs, ...LibraryService.sampleTracks];
+    if (_genreFilter == null) return [...base, ..._onlineSongs];
     return _all.where((s) => s.genreId == _genreFilter).toList();
   }
 

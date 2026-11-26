@@ -21,6 +21,6 @@ void main() {
   testWidgets('MusicApp builds home screen', (WidgetTester tester) async {
     await tester.pumpWidget(const MusicApp());
     await tester.pump();
-    expect(find.text('NhacOffline - N05'), findsOneWidget);
+    expect(find.text('Wavebox — Nghe nhạc Online + Offline'), findsOneWidget);
   });
 }

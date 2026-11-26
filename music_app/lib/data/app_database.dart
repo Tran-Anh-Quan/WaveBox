@@ -831,7 +831,10 @@ class AppDatabase {
       _mem['pending_sync']!.add({'id': _autoId++, ...row});
       return;
     }
-    await db.insert('pending_sync', row);
+    // Atomically insert with transaction (UC 9.x — data integrity)
+    await db.transaction((txn) async {
+      await txn.insert('pending_sync', row);
+    });
   }
 
   Future<Set<int>> getFailedPlaylistCreateIds() async {
