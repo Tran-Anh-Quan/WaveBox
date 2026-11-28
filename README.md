@@ -145,20 +145,33 @@ flutter build web
 
 ## 8. Cấu hình Backend (nếu có)
 
-Base URL đang cấu hình trong `music_app/lib/main.dart`:
+Base URL được cấu hình lúc chạy bằng `--dart-define` (mặc định `http://10.0.2.2:8080`):
 
-```dart
-_api = ApiClient(baseUrl: 'http://10.0.2.2:8080');
+```bash
+# Android emulator: giữ mặc định 10.0.2.2 (ánh xạ tới localhost của máy host)
+flutter run
+
+# Máy thật: truyền IP LAN của Backend
+flutter run --dart-define=API_BASE_URL=http://192.168.1.10:8080
+
+# Backend mock kèm theo (không cần cài Spring Boot)
+python mock_backend.py          # lắng nghe 0.0.0.0:8080
 ```
 
-- Android emulator: giữ `http://10.0.2.2:8080`
-- Máy thật: đổi thành IP LAN của Backend, ví dụ `http://192.168.1.10:8080`
-- Test API bằng Postman: `/api/auth/login`, `/api/auth/google`, `/api/songs`, `/api/playlists`
+- Backend mock hỗ trợ `POST /api/auth/register`, `POST /api/auth/login`, `PUT /api/auth/profile`, `GET /api/health`.
+- Test API bằng Postman: `/api/auth/register`, `/api/auth/login`, `/api/songs`, `/api/playlists`
+- Chạy test luồng đăng ký / đăng nhập (cần backend mock đang chạy):
+
+```bash
+cd music_app
+flutter test test/auth_flow_test.dart test/login_screen_test.dart
+```
 
 ## 9. Quyền Android
 
 Khai báo trong `music_app/android/app/src/main/AndroidManifest.xml`:
 
+- `INTERNET` (bắt buộc cho đăng ký / đăng nhập / đồng bộ)
 - `READ_MEDIA_AUDIO` / `READ_EXTERNAL_STORAGE`
 - `POST_NOTIFICATIONS`
 - `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK`

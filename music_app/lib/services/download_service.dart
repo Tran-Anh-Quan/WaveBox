@@ -30,13 +30,28 @@ class DownloadService {
       return filePath;
     }
 
-    final res = await http.get(Uri.parse(s.data));
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      throw Exception('Tải thất bại (HTTP ${res.statusCode})');
+    // Tải theo luồng (streaming) thay vì gom toàn bộ file vào RAM.
+    //
+    // `http.get` nạp hết body vào memory trước khi trả về. Với file nhạc
+    // vài chục MB, điều này tạo một đợt tăng bộ nhớ lớn → app bị giật và có
+    // nguy cơ bị Android kill. Ghi thẳng từ stream xuống đĩa giữ mức dùng
+    // bộ nhớ ổn định.
+    final client = http.Client();
+    try {
+      final req = http.Request('GET', Uri.parse(s.data));
+      final res = await client.send(req).timeout(const Duration(seconds: 30));
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw Exception('Tải thất bại (HTTP ${res.statusCode})');
+      }
+      final f = File(filePath);
+      final sink = f.openWrite();
+      await res.stream.pipe(sink);
+      await sink.flush();
+      await sink.close();
+    } finally {
+      client.close();
     }
-    final f = File(filePath);
-    await f.writeAsBytes(res.bodyBytes, flush: true);
-    final size = await f.length();
+    final size = await File(filePath).length();
     await db.saveDownload(
         songId: s.id, filePath: filePath, format: ext, fileSize: size);
     await db.upsertSongCache(s.copyWith(isDownloaded: true));

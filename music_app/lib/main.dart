@@ -39,23 +39,34 @@ class _MusicAppState extends State<MusicApp> {
   late final ConnectivityService _connectivity;
   late final SyncService _sync;
 
+  // ThemeData dựng 1 lần thay vì mỗi lần build.
+  final ThemeData _darkTheme = AppTheme.dark();
+  final ThemeData _lightTheme = AppTheme.light();
+
   @override
   void initState() {
     super.initState();
     _player = widget.player ?? PlayerController();
-    // Đổi baseUrl cho đúng Backend Spring Boot của bạn (UC 8.x).
-    // Android emulator: 10.0.2.2 ; máy thật: IP LAN, ví dụ http://192.168.1.10:8080
-    _api = ApiClient(baseUrl: 'http://10.0.2.2:8080');
+    // Base URL của Backend Spring Boot (UC 8.x).
+    // Cấu hình lúc chạy: flutter run --dart-define=API_BASE_URL=http://192.168.1.10:8080
+    // Mặc định: Android emulator dùng 10.0.2.2 (ánh xạ tới localhost của máy host).
+    const baseUrl = String.fromEnvironment(
+      'API_BASE_URL',
+      defaultValue: 'http://10.0.2.2:8080',
+    );
+    _api = ApiClient(baseUrl: baseUrl);
     _connectivity = ConnectivityService();
-    _auth = AuthViewModel(repo: AuthRepository(api: _api));
+    final db = AppDatabase();
+    _auth = AuthViewModel(repo: AuthRepository(api: _api), db: db);
     _auth.loadSaved();
-    _sync = SyncService(db: AppDatabase(), api: _api, connectivity: _connectivity);
+    _sync = SyncService(db: db, api: _api, connectivity: _connectivity);
     _sync.startAutoSync();
   }
 
   @override
   void dispose() {
     _sync.stop();
+    _api.dispose();
     super.dispose();
   }
 
@@ -73,8 +84,10 @@ class _MusicAppState extends State<MusicApp> {
         title: 'Wavebox — Nghe nhạc Online + Offline',
         debugShowCheckedModeBanner: false,
         themeMode: _dark ? ThemeMode.dark : ThemeMode.light,
-        theme: AppTheme.light(),
-        darkTheme: AppTheme.dark(),
+        // ThemeData được dựng lại mỗi lần build là việc tốn kém không cần
+        // thiết; cache lại theo chế độ sáng/tối.
+        theme: _dark ? _darkTheme : _lightTheme,
+        darkTheme: _darkTheme,
         home: HomeScreen(
           dark: _dark,
           onToggleTheme: () => setState(() => _dark = !_dark),

@@ -44,9 +44,31 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _loading = true;
   String _status = '';
 
+  // ---------------------------------------------------------------------------
+  // Cache các Future cho FutureBuilder.
+  //
+  // `FutureBuilder(future: _db.getHistoryRows())` tạo một Future MỚI ở mỗi
+  // lần build. FutureBuilder thấy future đổi nên huỷ đăng ký cũ và đăng ký
+  // lại → mỗi lần rebuild lại query DB một vòng → rebuild tiếp → lặp vô hạn.
+  // Giữ future trong state và chỉ làm mới khi dữ liệu thực sự đổi.
+  // ---------------------------------------------------------------------------
+  Future<List<Song>>? _downloadedSongsFuture;
+  Future<List<Map<String, dynamic>>>? _historyFuture;
+  Future<List<Song>>? _favoritesFuture;
+  Future<List<Map<String, dynamic>>>? _downloadsFuture;
+
+  /// Nạp lại các future liên quan tới lịch sử / yêu thích / tải về.
+  void _refreshLists() {
+    _downloadedSongsFuture = _db.getDownloadedSongs();
+    _historyFuture = _db.getHistoryRows();
+    _favoritesFuture = _db.getFavorites();
+    _downloadsFuture = _db.getDownloads();
+  }
+
   @override
   void initState() {
     super.initState();
+    _refreshLists();
     _refresh();
     WidgetsBinding.instance.addPostFrameCallback((_) => _fetchOnline());
   }
@@ -78,7 +100,12 @@ class _HomeScreenState extends State<HomeScreen> {
       final valid = mapped.where((s) => s.data.isNotEmpty).toList();
       if (valid.isEmpty) return;
       await _db.upsertSongsCache(valid);
-      if (mounted) setState(() => _onlineSongs = valid);
+      if (mounted) {
+        setState(() {
+          _onlineSongs = valid;
+          _invalidateLists();
+        });
+      }
     } catch (_) {}
   }
 
@@ -92,54 +119,96 @@ class _HomeScreenState extends State<HomeScreen> {
     final favs = await _db.getFavoriteIds();
     final genres = await _db.getGenres();
     await _db.upsertSongsCache(songs);
+    if (!mounted) return;
     setState(() {
       _deviceSongs = songs;
       _favIds = favs;
       _genres = genres;
       _loading = false;
+      _invalidateLists();
       _status = songs.isEmpty
           ? 'Chưa thấy nhạc trên máy — thử "Chọn file" hoặc nghe nhạc mẫu online.'
           : 'Tìm thấy ${songs.length} bài trên thiết bị';
     });
+    _refreshLists();
   }
 
-  List<Song> get _all =>
-      [..._picked, ..._deviceSongs, ..._onlineSongs];
+  // ---------------------------------------------------------------------------
+  // Cache các danh sách được tính toán.
+  //
+  // Trước đây `_all`, `_filtered`, `_byArtist`, `_byAlbum` được tính lại ở
+  // mỗi lần build (và `_byArtist`/`_byAlbum` duyệt toàn bộ thư viện mỗi
+  // lần). Với thư viện lớn, mỗi lần vuốt/dổi tab là một lượt duyệt lại toàn
+  // bộ → giật. Nay chỉ tính lại khi dữ liệu nguồn thực sự thay đổi.
+  // ---------------------------------------------------------------------------
 
-  List<Song> get _localOnly => [..._picked, ..._deviceSongs];
+  List<Song>? _cAll;
+  List<Song>? _cLocalOnly;
+  List<Song>? _cFiltered;
+  List<Song>? _cFilteredLocal;
+  Map<String, List<Song>>? _cByArtist;
+  Map<String, List<Song>>? _cByAlbum;
+
+  void _invalidateLists() {
+    _cAll = null;
+    _cLocalOnly = null;
+    _cFiltered = null;
+    _cFilteredLocal = null;
+    _cByArtist = null;
+    _cByAlbum = null;
+  }
+
+  List<Song> get _all => _cAll ??= [..._picked, ..._deviceSongs, ..._onlineSongs];
+
+  List<Song> get _localOnly => _cLocalOnly ??= [..._picked, ..._deviceSongs];
 
   List<Song> get _filtered {
+    final cached = _cFiltered;
+    if (cached != null) return cached;
     final base = _localOnly;
-    if (_genreFilter == null) return [...base, ..._onlineSongs];
-    return _all.where((s) => s.genreId == _genreFilter).toList();
+    final result = _genreFilter == null
+        ? [...base, ..._onlineSongs]
+        : _all.where((s) => s.genreId == _genreFilter).toList();
+    _cFiltered = result;
+    return result;
   }
 
   List<Song> get _filteredLocal {
-    if (_genreFilter == null) return _localOnly;
-    return _localOnly.where((s) => s.genreId == _genreFilter).toList();
+    final cached = _cFilteredLocal;
+    if (cached != null) return cached;
+    final result = _genreFilter == null
+        ? _localOnly
+        : _localOnly.where((s) => s.genreId == _genreFilter).toList();
+    _cFilteredLocal = result;
+    return result;
   }
 
   Map<String, List<Song>> get _byArtist {
+    if (_cByArtist != null) return _cByArtist!;
     final m = <String, List<Song>>{};
     for (final s in _all) {
       m.putIfAbsent(s.artist, () => []).add(s);
     }
-    return m;
+    return _cByArtist = m;
   }
 
   Map<String, List<Song>> get _byAlbum {
+    if (_cByAlbum != null) return _cByAlbum!;
     final m = <String, List<Song>>{};
     for (final s in _all) {
       m.putIfAbsent(s.album, () => []).add(s);
     }
-    return m;
+    return _cByAlbum = m;
   }
 
   Future<void> _pickFiles() async {
     final songs = await _lib.pickAudioFiles();
     if (songs.isNotEmpty) {
       await _db.upsertSongsCache(songs);
-      setState(() => _picked = [...songs, ..._picked]);
+      setState(() {
+        _picked = [...songs, ..._picked];
+        _invalidateLists();
+      });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Đã thêm ${songs.length} bài vào thư viện')));
@@ -158,6 +227,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _favIds.remove(s.id);
       }
     });
+    _refreshLists();
   }
 
   void _openDetail(Song s) async {
@@ -204,6 +274,7 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _picked.removeWhere((e) => e.id == s.id);
       _deviceSongs.removeWhere((e) => e.id == s.id);
+      _invalidateLists();
     });
     await _db.upsertSongsCache([s.copyWith(isDownloaded: false)]);
     if (mounted) {
@@ -429,11 +500,17 @@ class _HomeScreenState extends State<HomeScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
         children: [
           _chip('Tất cả', _genreFilter == null, () {
-            setState(() => _genreFilter = null);
+            setState(() {
+              _genreFilter = null;
+              _invalidateLists();
+            });
           }),
           for (final g in _genres)
             _chip(g.name, _genreFilter == g.id, () {
-              setState(() => _genreFilter = g.id);
+              setState(() {
+                _genreFilter = g.id;
+                _invalidateLists();
+              });
             }),
           _chip('Video MP4', false, () {
             Navigator.push(context,
@@ -570,7 +647,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _downloadedTab() {
     return FutureBuilder(
-      future: _db.getDownloadedSongs(),
+      future: _downloadedSongsFuture,
       builder: (context, snap) {
         final items = snap.data ?? [];
         if (items.isEmpty) {
@@ -780,7 +857,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ).then((_) => _refresh()),
         ),
         FutureBuilder(
-          future: _db.getHistoryRows(),
+          future: _historyFuture,
           builder: (context, snap) {
             final rows = snap.data ?? [];
             return Container(
@@ -847,7 +924,7 @@ class _HomeScreenState extends State<HomeScreen> {
           },
         ),
         FutureBuilder(
-          future: _db.getFavorites(),
+          future: _favoritesFuture,
           builder: (context, snap) {
             final items = snap.data ?? [];
             return MenuCard(
@@ -863,7 +940,7 @@ class _HomeScreenState extends State<HomeScreen> {
           },
         ),
         FutureBuilder(
-          future: _db.getDownloads(),
+          future: _downloadsFuture,
           builder: (context, snap) {
             final items = snap.data ?? [];
             return MenuCard(

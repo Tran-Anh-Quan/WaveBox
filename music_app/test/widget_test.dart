@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:music_app/main.dart';
 import 'package:music_app/models/song.dart';
@@ -21,6 +22,9 @@ void main() {
   testWidgets('MusicApp builds home screen', (WidgetTester tester) async {
     await tester.pumpWidget(const MusicApp());
     await tester.pump();
-    expect(find.text('Wavebox — Nghe nhạc Online + Offline'), findsOneWidget);
+    // Màn hình khám phá đang tải dữ liệu nên hiện CircularProgressIndicator;
+    // thanh điều hướng dưới luôn có mặt.
+    expect(find.byType(NavigationBar), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
   });
 }

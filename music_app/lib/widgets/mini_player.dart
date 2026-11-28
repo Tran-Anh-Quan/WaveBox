@@ -21,11 +21,6 @@ class MiniPlayer extends StatelessWidget {
     final s = pc.current;
     if (s == null) return const SizedBox.shrink();
     final dark = Theme.of(context).brightness == Brightness.dark;
-    final total = pc.duration.inMilliseconds;
-    final pos = total == 0
-        ? 0.0
-        : pc.position.inMilliseconds.clamp(0, total).toDouble() /
-            total.toDouble();
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -91,23 +86,35 @@ class MiniPlayer extends StatelessWidget {
                   ],
                 ),
               ),
-              SizedBox(
-                height: 3,
-                child: Stack(
-                  children: [
-                    Container(
-                        color: dark
-                            ? Colors.white.withOpacity(0.08)
-                            : Colors.black.withOpacity(0.08)),
-                    FractionallySizedBox(
-                      widthFactor: pos.clamp(0.0, 1.0),
-                      child: Container(
-                        decoration: const BoxDecoration(
-                            gradient: AppTheme.brandGradient),
-                      ),
+              // Thanh tiến độ chỉ lắng nghe position/duration, không rebuild
+              // cả mini player mỗi lần position thay đổi.
+              ValueListenableBuilder<Duration>(
+                valueListenable: pc.positionNotifier,
+                builder: (context, pos, _) {
+                  final total = pc.duration.inMilliseconds;
+                  final fraction = total == 0
+                      ? 0.0
+                      : pos.inMilliseconds.clamp(0, total).toDouble() /
+                          total.toDouble();
+                  return SizedBox(
+                    height: 3,
+                    child: Stack(
+                      children: [
+                        Container(
+                            color: dark
+                                ? Colors.white.withOpacity(0.08)
+                                : Colors.black.withOpacity(0.08)),
+                        FractionallySizedBox(
+                          widthFactor: fraction.clamp(0.0, 1.0),
+                          child: Container(
+                            decoration: const BoxDecoration(
+                                gradient: AppTheme.brandGradient),
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
+                  );
+                },
               ),
             ],
           ),

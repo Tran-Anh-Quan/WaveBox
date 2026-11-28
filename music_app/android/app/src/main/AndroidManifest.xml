@@ -1,4 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- INTERNET: cần cho mọi lệnh gọi REST (đăng ký / đăng nhập / sync).
+         Khai báo ở main manifest để bản release cũng có quyền này. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Music offline N05: storage / media / background playback permissions (API 26-34) -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
@@ -11,7 +14,8 @@
     <application
         android:label="NhacOffline N05"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"

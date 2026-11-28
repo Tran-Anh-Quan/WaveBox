@@ -39,8 +39,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
         ),
       );
     }
-    final total = pc.duration.inMilliseconds;
-    final pos = pc.position.inMilliseconds.clamp(0, total == 0 ? 0 : total);
     final remain = pc.sleepUntil == null
         ? null
         : pc.sleepUntil!.difference(DateTime.now());
@@ -150,23 +148,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
                   ),
                 const SizedBox(height: 10),
-                Slider(
-                  value: total == 0 ? 0 : pos.toDouble(),
-                  max: (total == 0 ? 1 : total).toDouble(),
-                  onChanged: (v) => pc.seek(Duration(milliseconds: v.toInt())),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(fmt(pc.position),
-                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                      Text(fmt(pc.duration),
-                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                    ],
-                  ),
-                ),
+                _SeekBar(pc: pc),
                 Container(
                   margin: const EdgeInsets.only(top: 6),
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -394,6 +376,68 @@ class _PlayerScreenState extends State<PlayerScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Thanh tua bài.
+///
+/// - Chỉ lắng nghe `positionNotifier`, nên màn hình player không bị rebuild
+///   mỗi lần vị trí phát thay đổi.
+/// - Trong lúc đang kéo, giá trị hiển thị cập nhật cục bộ và chỉ gọi
+///   `seek` một lần khi thả chuột. Gọi seek ở mỗi sự kiện kéo sẽ gửi
+///   hàng chục lệnh qua platform channel → gây nghẽn khi tua.
+class _SeekBar extends StatefulWidget {
+  final PlayerController pc;
+  const _SeekBar({required this.pc});
+
+  @override
+  State<_SeekBar> createState() => _SeekBarState();
+}
+
+class _SeekBarState extends State<_SeekBar> {
+  double? _dragValue;
+
+  @override
+  Widget build(BuildContext context) {
+    final pc = widget.pc;
+    // Nghe position. Khi duration đổi (bài online chỉ biết thời lượng sau
+    // khi tải xong header), controller gọi notifyListeners() nên widget cha
+    // rebuild và đọc lại pc.duration ở đây.
+    return ValueListenableBuilder<Duration>(
+      valueListenable: pc.positionNotifier,
+      builder: (context, position, _) {
+        final duration = pc.duration;
+        final total = duration.inMilliseconds;
+        final max = (total == 0 ? 1 : total).toDouble();
+        final value = _dragValue ?? (total == 0 ? 0.0 : position.inMilliseconds.clamp(0, total).toDouble());
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Slider(
+              value: value.clamp(0.0, max),
+              max: max,
+              onChanged: (v) => setState(() => _dragValue = v),
+              onChangeEnd: (v) {
+                setState(() => _dragValue = null);
+                pc.seek(Duration(milliseconds: v.toInt()));
+              },
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(fmt(Duration(milliseconds: value.toInt())),
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                  Text(fmt(duration),
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
