@@ -4,6 +4,7 @@ import '../../../core/network/api_client.dart';
 import '../../../core/network/connectivity_service.dart';
 import '../../../data/app_database.dart';
 import '../../../models/song.dart';
+import '../../../models/playlist.dart';
 
 /// Đồng bộ (UC 9.x): RESTful API + Pending Sync Queue (SQLite) +
 /// retry tối đa 5 lần + khôi phục khi đăng nhập thiết bị mới (UC 9.4).

@@ -563,9 +563,31 @@ class AppDatabase {
   }
 
   Future<void> upsertSongsCache(List<Song> songs) async {
-    for (final s in songs) {
-      await upsertSongCache(s);
+    if (songs.isEmpty) return;
+    final db = await _open();
+    if (db == null) {
+      for (final s in songs) {
+        final i = _mem['songs_cache']!.indexWhere((e) => e['id'] == s.id);
+        final row = {'id': s.id, ...s.toCacheMap()};
+        if (i >= 0) {
+          _mem['songs_cache']![i] = row;
+        } else {
+          _mem['songs_cache']!.add(row);
+        }
+      }
+      return;
     }
+    // Ghi bằng batch trong một transaction.
+    //
+    // Trước đây mỗi bài là một lần `insert` riêng (mỗi lần một transaction
+    // + một vòng qua platform channel). Với vài nghìn bài trong thư viện,
+    // thao tác này mất hàng giây và làm app "đứng" lúc khởi động/quét lại.
+    final batch = db.batch();
+    for (final s in songs) {
+      batch.insert('songs_cache', s.toCacheMap(),
+          conflictAlgorithm: ConflictAlgorithm.replace);
+    }
+    await batch.commit(noResult: true);
   }
 
   /// Tìm kiếm offline: theo tên bài / nghệ sĩ / album + lọc thể loại (UC 2.1-2.4).
@@ -831,7 +853,10 @@ class AppDatabase {
       _mem['pending_sync']!.add({'id': _autoId++, ...row});
       return;
     }
-    await db.insert('pending_sync', row);
+    // Atomically insert with transaction (UC 9.x — data integrity)
+    await db.transaction((txn) async {
+      await txn.insert('pending_sync', row);
+    });
   }
 
   Future<Set<int>> getFailedPlaylistCreateIds() async {

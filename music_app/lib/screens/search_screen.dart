@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../data/app_database.dart';
@@ -22,6 +24,10 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
   List<Genre> genres = [];
   List<Song> cacheResult = [];
 
+  /// Debounce cho truy vấn DB: gõ mỗi ký tự sẽ gọi `searchCache` vào SQLite.
+  /// Chờ ngừng 300ms mới query để tránh dội DB khi gõ nhanh.
+  Timer? _searchDebounce;
+
   @override
   void initState() {
     super.initState();
@@ -31,9 +37,26 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
     });
   }
 
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _tabs.dispose();
+    super.dispose();
+  }
+
+  /// Kết quả lọc trong bộ nhớ.
+  ///
+  /// Được tính 1 lần mỗi lần build thay vì mỗi tab gọi lại (4 lần quét
+  /// toàn bộ danh sách cho cùng một từ khoá).
+  List<Song>? _memCache;
+  String _memKey = '';
+
   List<Song> get _inMemory {
     final k = q.trim().toLowerCase();
-    return widget.songs
+    final key = '$k|$genreId|${widget.songs.length}';
+    final cached = _memCache;
+    if (cached != null && _memKey == key) return cached;
+    final result = widget.songs
         .where((s) =>
             (k.isEmpty ||
                 s.title.toLowerCase().contains(k) ||
@@ -41,11 +64,25 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
                 s.album.toLowerCase().contains(k)) &&
             (genreId == null || s.genreId == genreId))
         .toList();
+    _memCache = result;
+    _memKey = key;
+    return result;
+  }
+
+  /// Lên lịch truy vấn DB sau một khoảng lặng ngắn.
+  void _scheduleSearchCache() {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 300), _searchCache);
   }
 
   Future<void> _searchCache() async {
-    final r = await AppDatabase().searchCache(q, genreId: genreId);
-    if (mounted) setState(() => cacheResult = r);
+    final keyword = q;
+    final genre = genreId;
+    final r = await AppDatabase().searchCache(keyword, genreId: genre);
+    if (!mounted) return;
+    // Bỏ qua kết quả đã lỗi thời (người dùng đã gõ tiếp).
+    if (keyword != q || genre != genreId) return;
+    setState(() => cacheResult = r);
   }
 
   List<Song> _byTab(int tab) {
@@ -98,7 +135,7 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
               ),
               onChanged: (v) {
                 setState(() => q = v);
-                _searchCache();
+                _scheduleSearchCache();
               },
             ),
           ),

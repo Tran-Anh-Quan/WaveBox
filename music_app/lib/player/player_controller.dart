@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../data/app_database.dart';
 import '../models/song.dart';
+import '../services/audio_cache_service.dart';
 
 enum PlayRepeat { off, all, one }
 
@@ -33,6 +34,17 @@ class PlayerController extends ChangeNotifier {
   double volume = 1.0;
   bool muted = false;
 
+  /// Vị trí phát hiện tại, cập nhật liên tục.
+  ///
+  /// Tách riêng khỏi [notifyListeners] vì position thay đổi ~5 lần/giây. Nếu
+  /// đưa nó vào thông báo chung, toàn bộ widget đang `watch` controller sẽ
+  /// rebuild liên tục → giật hình. Widget thanh tiến độ chỉ cần lắng nghe
+  /// `ValueNotifier` này.
+  final ValueNotifier<Duration> positionNotifier = ValueNotifier(Duration.zero);
+
+  /// Thời lượng bài hiện tại, cũng được tách riêng vì lý do tương tự.
+  final ValueNotifier<Duration> durationNotifier = ValueNotifier(Duration.zero);
+
   StreamSubscription<Duration>? _posSub;
   StreamSubscription<Duration?>? _durSub;
   StreamSubscription<PlayerState>? _stateSub;
@@ -40,10 +52,14 @@ class PlayerController extends ChangeNotifier {
   PlayerController() {
     _posSub = _player.positionStream.listen((p) {
       position = p;
-      notifyListeners();
+      // Chỉ thông báo cho thanh tiến độ, không rebuild cả cây widget.
+      positionNotifier.value = p;
     });
     _durSub = _player.durationStream.listen((d) {
-      duration = d ?? Duration.zero;
+      final next = d ?? Duration.zero;
+      if (next == duration) return;
+      duration = next;
+      durationNotifier.value = next;
       notifyListeners();
     });
     _stateSub = _player.playerStateStream.listen((s) {
@@ -87,18 +103,32 @@ class PlayerController extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Lưu cài đặt sau khi ngừng thao tác (debounce).
+  ///
+  /// Slider volume phát ra hàng chục sự kiện mỗi lần kéo. Nếu ghi
+  /// SharedPreferences ngay mỗi lần thì mỗi sự kiện đều là một lần ghi
+  /// đĩa → kéo slider bị nghẽn và vòng lặp UI bị chậm.
+  Timer? _prefsTimer;
+
+  void _scheduleSavePrefs() {
+    _prefsTimer?.cancel();
+    _prefsTimer = Timer(const Duration(milliseconds: 400), () {
+      unawaited(_savePrefs());
+    });
+  }
+
   Future<void> setVolume(double v) async {
     volume = v.clamp(0.0, 1.0);
     if (volume > 0) muted = false;
     await _player.setVolume(muted ? 0.0 : volume);
-    await _savePrefs();
+    _scheduleSavePrefs();
     notifyListeners();
   }
 
   Future<void> toggleMute() async {
     muted = !muted;
     await _player.setVolume(muted ? 0.0 : volume);
-    await _savePrefs();
+    _scheduleSavePrefs();
     notifyListeners();
   }
 
@@ -131,10 +161,12 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
     final s = queue[index];
     try {
-      final uri = s.isOnline ? Uri.parse(s.data) : Uri.file(s.data);
-      await _player.setAudioSource(AudioSource.uri(uri, tag: _toMediaItem(s)));
+      final source = await _buildSource(s);
+      await _player.setAudioSource(source);
       await _player.play();
       unawaited(_db.pushHistory(s));
+      // Tải trước bài kế tiếp để lần chuyển bài sau không phải chờ mạng.
+      unawaited(_prefetchNext());
     } catch (e) {
       error = 'Không phát được "${s.title}". Chuyển bài tiếp theo.';
       notifyListeners();
@@ -144,6 +176,36 @@ class PlayerController extends ChangeNotifier {
       loading = false;
       notifyListeners();
     }
+  }
+
+  /// Dựng nguồn phát cho một bài.
+  ///
+  /// Với nhạc online: nếu bản tải đã nằm trong cache thì phát thẳng file
+  /// cục bộ (không buffer qua mạng → khởi động tức thì). Nếu chưa có thì
+  /// phát từ URL và tải bản cache chạy nền.
+  Future<AudioSource> _buildSource(Song s) async {
+    final tag = _toMediaItem(s);
+    if (!s.isOnline) {
+      return AudioSource.uri(Uri.file(s.data), tag: tag);
+    }
+    final cached = await AudioCacheService.instance.cachedFile(s.data);
+    if (cached != null) {
+      return AudioSource.uri(Uri.file(cached.path), tag: tag);
+    }
+    unawaited(AudioCacheService.instance.prefetch(s.data));
+    return AudioSource.uri(Uri.parse(s.data), tag: tag);
+  }
+
+  /// Tải trước bài sẽ phát kế tiếp (bài online) để chuyển bài không bị đứng.
+  Future<void> _prefetchNext() async {
+    if (queue.isEmpty) return;
+    final nextIndex = shuffle && _shuffleOrder.isNotEmpty
+        ? _shuffleOrder[(_shufflePos + 1) % _shuffleOrder.length]
+        : (currentIndex + 1) % queue.length;
+    if (nextIndex < 0 || nextIndex >= queue.length) return;
+    final next = queue[nextIndex];
+    if (!next.isOnline) return;
+    await AudioCacheService.instance.prefetch(next.data);
   }
 
   Future<void> playSong(Song s) async {
@@ -242,6 +304,9 @@ class PlayerController extends ChangeNotifier {
     _durSub?.cancel();
     _stateSub?.cancel();
     _sleepTimer?.cancel();
+    _prefsTimer?.cancel();
+    positionNotifier.dispose();
+    durationNotifier.dispose();
     _player.dispose();
     super.dispose();
   }
